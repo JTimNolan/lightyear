@@ -165,8 +165,8 @@ pub trait AppCatchUpExt {
     /// single catch-up scope.
     ///
     /// The components in `T` must also be registered for replication
-    /// separately (typically via `replicate_once::<C>()` and
-    /// `add_rollback::<C>().add_confirmed_write()`).
+    /// separately (typically via `component::<C>().replicate_once()` and
+    /// `local_rollback::<C>().add_confirmed_write()`).
     fn register_catchup_components<T: FilterScope + Send + Sync + 'static>(&mut self) -> &mut Self;
 }
 

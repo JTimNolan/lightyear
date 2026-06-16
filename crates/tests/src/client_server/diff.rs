@@ -7,9 +7,7 @@ use bevy_replicon::prelude::{RepliconPlugins, RepliconTick, RuleFns};
 use bevy_replicon::shared::replication::diff::{DiffEntityExt, DiffWire};
 use bevy_replicon::shared::replication::registry::ReplicationRegistry;
 use bevy_replicon::shared::replication::registry::test_fns::TestFnsEntityExt;
-use lightyear::prelude::{
-    InterpolationPlugin, InterpolationRegistrationExt, PredictionRegistrationExt,
-};
+use lightyear::prelude::{InterpolationPlugin, InterpolationRegistrationExt, PredictionBuilderExt};
 use lightyear_connection::network_target::NetworkTarget;
 use lightyear_core::prelude::{ConfirmedHistory, ConfirmedState, Interpolated};
 use lightyear_messages::MessageManager;
@@ -158,8 +156,9 @@ fn setup_prediction_receive_app() -> (App, bevy_replicon::shared::replication::r
     app.insert_resource(ReplicationCheckpointMap::default());
     app.world_mut().spawn(PredictionManager::default());
     app.world_mut().flush();
-    app.register_component_diff::<CompRepliconDiff>()
-        .add_prediction_diff();
+    app.component::<CompRepliconDiff>()
+        .replicate_diff()
+        .predict_diff();
 
     let fns_id = app
         .world_mut()
@@ -179,7 +178,8 @@ fn setup_interpolation_receive_app() -> (App, bevy_replicon::shared::replication
         InterpolationPlugin,
     ));
     app.insert_resource(ReplicationCheckpointMap::default());
-    app.register_component_diff::<CompRepliconDiff>()
+    app.component::<CompRepliconDiff>()
+        .replicate_diff()
         .add_custom_interpolation_diff();
 
     let fns_id = app
