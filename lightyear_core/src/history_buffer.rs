@@ -177,6 +177,41 @@ impl<R> HistoryBuffer<R> {
         ));
     }
 
+    /// Add an update, keeping the buffer **sorted by tick** and **deduplicated** (a new value
+    /// replaces any existing entry at the same tick). See [`Self::add_sorted`].
+    pub fn add_update_sorted(&mut self, tick: Tick, value: R) {
+        self.add_sorted(tick, Some(value));
+    }
+
+    /// Add a removal, keeping the buffer sorted by tick and deduplicated. See [`Self::add_sorted`].
+    pub fn add_remove_sorted(&mut self, tick: Tick) {
+        self.add_sorted(tick, None);
+    }
+
+    /// Add a value while preserving the buffer's sorted-by-tick invariant, regardless of arrival order.
+    ///
+    /// Unlike [`Self::add`] (which assumes monotonic insertion and only dedups against the tail), this
+    /// inserts at the sorted position and replaces an existing entry for the same tick. Use it when
+    /// updates can arrive out of order — e.g. interpolation's [`crate`] consumers (`sample`, the drain)
+    /// all assume a monotonic buffer, so a post-stall packet burst that delivers ticks out of order would
+    /// otherwise corrupt the buffer (a stale value can end up selected as the interpolation start).
+    pub fn add_sorted(&mut self, tick: Tick, value: Option<R>) {
+        let state = match value {
+            Some(value) => HistoryState::Updated(value),
+            None => HistoryState::Removed,
+        };
+        // First index whose tick is >= the new tick.
+        let idx = self.buffer.partition_point(|(t, _)| *t < tick);
+        if let Some((existing_tick, existing)) = self.buffer.get_mut(idx)
+            && *existing_tick == tick
+        {
+            // Dedup: an entry for this exact tick already exists — replace its value (newest wins).
+            *existing = state;
+            return;
+        }
+        self.buffer.insert(idx, (tick, state));
+    }
+
     /// Peek at the most recent value in the history buffer
     pub fn peek(&self) -> Option<&(Tick, HistoryState<R>)> {
         self.buffer.back()

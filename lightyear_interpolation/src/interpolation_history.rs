@@ -75,8 +75,10 @@ impl<C> ConfirmedHistory<C> {
         }
     }
 
-    /// Get the n-th oldest tick in the buffer (starts from n = 0)
-    pub(crate) fn get_nth(&self, n: usize) -> Option<(Tick, &C)> {
+    /// Get the n-th oldest `(tick, value)` in the buffer (starts from n = 0), skipping removals.
+    /// `pub` (was `pub(crate)`) so downstream diagnostics can dump the full keyframe buffer — needed to
+    /// see how the buffer transforms across the interpolation snap (battlemage interp-stale-keyframe).
+    pub fn get_nth(&self, n: usize) -> Option<(Tick, &C)> {
         match self.history.get_nth(n) {
             None | Some((_, HistoryState::Removed)) => None,
             Some((t, HistoryState::Updated(v))) => Some((*t, v)),
@@ -84,16 +86,21 @@ impl<C> ConfirmedHistory<C> {
     }
 
     /// Push a new value in the history.
-    /// It MUST be more recent than all previous values, which is guaranteed from
-    /// how lightyear_replication::receive works
+    ///
+    /// Normally updates arrive in tick order (`lightyear_replication::receive`), but under a post-stall
+    /// packet burst they can arrive **out of order**. The interpolation consumers (`sample`, the drain in
+    /// `update_confirmed_history`) all assume a monotonic buffer, so we insert sorted + dedup-by-tick
+    /// (`add_update_sorted`) to keep that invariant regardless of arrival order — otherwise a late update
+    /// followed by `push_unchanged` could leave a stale value selected as the interpolation `start`,
+    /// rendering the entity backward (a visible snap).
     pub fn push(&mut self, tick: Tick, value: C) {
-        self.history.add_update(tick, value);
+        self.history.add_update_sorted(tick, value);
         self.newest_is_unchanged = false;
     }
 
-    /// Push a removal in the history.
+    /// Push a removal in the history. Sorted + dedup'd, same rationale as [`Self::push`].
     pub(crate) fn push_remove(&mut self, tick: Tick) {
-        self.history.add_remove(tick);
+        self.history.add_remove_sorted(tick);
         self.newest_is_unchanged = false;
     }
 
@@ -296,6 +303,48 @@ mod tests {
         let mut registry = InterpolationRegistry::default();
         registry.set_interpolation::<TestComp>(lerp);
         registry
+    }
+
+    /// Regression: a post-stall packet burst can deliver confirmed updates **out of tick order**. The
+    /// buffer (and every consumer: `sample`, the drain) assumes monotonic-by-tick order, so out-of-order
+    /// pushes must still leave the buffer sorted + deduplicated — otherwise `sample` selects a stale
+    /// keyframe as the interpolation `start` and the entity renders backward (a visible snap).
+    ///
+    /// Models the observed failure (value == tick for constant-velocity motion): the real update for tick
+    /// 1165 arrives, then late packets for 1159 and 1152. Before the fix the buffer was
+    /// `[1146,1165,1159,1152]` and `sample(1165)` returned the stale 1152 value; after, it stays
+    /// `[1146,1152,1159,1165]` and samples the real 1165 value.
+    #[test]
+    fn out_of_order_pushes_keep_history_sorted_and_sample_correct() {
+        let mut history = ConfirmedHistory::<TestComp>::default();
+        history.push(Tick(1146), TestComp(1146.0));
+        history.push(Tick(1165), TestComp(1165.0)); // real update for tick 1165
+        history.push(Tick(1159), TestComp(1159.0)); // late packet, out of order
+        history.push(Tick(1152), TestComp(1152.0)); // late packet, out of order
+
+        // The buffer must be sorted by tick with no duplicates, regardless of arrival order.
+        let nth = |h: &ConfirmedHistory<TestComp>, n| h.get_nth(n).map(|(t, _)| t.0 as i64);
+        assert_eq!(nth(&history, 0), Some(1146));
+        assert_eq!(nth(&history, 1), Some(1152));
+        assert_eq!(nth(&history, 2), Some(1159));
+        assert_eq!(nth(&history, 3), Some(1165));
+        assert_eq!(nth(&history, 4), None);
+
+        // A duplicate tick from a late update must replace in place (newest value wins), not pile up.
+        history.push(Tick(1159), TestComp(1159.5));
+        assert_eq!(
+            history.get_nth(2).map(|(t, v)| (t.0 as i64, v.0)),
+            Some((1159, 1159.5))
+        );
+        let len = (0..).take_while(|n| history.get_nth(*n).is_some()).count();
+        assert_eq!(len, 4, "duplicate tick must dedup, not grow the buffer");
+
+        // Sampling at tick 1165 must return the REAL value (1165.0), not the stale 1152 value.
+        let registry = registry();
+        match history.sample(Tick(1165), 0.0, &registry) {
+            ConfirmedHistorySample::Present(v) => assert_eq!(v, TestComp(1165.0)),
+            other => panic!("expected Present(1165.0), got {other:?}"),
+        }
     }
 
     #[test]
